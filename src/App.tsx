@@ -13,6 +13,7 @@ type NoteInstance = {
   def: NoteDef;
   x: number;
   color: string;
+  duration: string;
 };
 
 // UI 렌더링용 상수
@@ -25,6 +26,11 @@ const BLACK_KEYS = [
   { id: 'G#/Ab', spacer: false },
   { id: 'A#/Bb', spacer: false },
 ];
+
+const SOLFEGE_MAP: Record<string, string> = {
+  'C': '도', 'D': '레', 'E': '미', 'F': '파', 'G': '솔', 'A': '라', 'B': '시',
+  'C#/Db': '도#/레b', 'D#/Eb': '레#/미b', 'F#/Gb': '파#/솔b', 'G#/Ab': '솔#/라b', 'A#/Bb': '라#/시b'
+};
 
 const CANVAS_WIDTH = 400;
 const CANVAS_HEIGHT = 240; 
@@ -102,6 +108,8 @@ export default function App() {
   // 로컬 스토리지 연동 상태
   const [speed, setSpeed] = useLocalStorage<number>({ key: 'music-app-speed', defaultValue: 1.5 });
   const [useAccidentals, setUseAccidentals] = useLocalStorage<boolean>({ key: 'music-app-accidentals', defaultValue: false });
+  const [randomBeats, setRandomBeats] = useLocalStorage<boolean>({ key: 'music-app-beats', defaultValue: false });
+  const [displayMode, setDisplayMode] = useLocalStorage<'alphabet' | 'solfege'>({ key: 'music-app-display-mode', defaultValue: 'alphabet' });
   const [clef, setClef] = useLocalStorage<'treble' | 'bass'>({ key: 'music-app-clef', defaultValue: 'treble' });
   const [range, setRange] = useLocalStorage<[number, number]>({ key: 'music-app-range', defaultValue: [14, 28] }); 
   
@@ -136,18 +144,23 @@ export default function App() {
   const spawnNote = useCallback((startX = START_X) => {
     if (activeNotePool.length === 0) return;
     const randomIndex = Math.floor(Math.random() * activeNotePool.length);
+    
+    const durations = ['w', 'h', 'q', '8'];
+    const selectedDuration = randomBeats ? durations[Math.floor(Math.random() * durations.length)] : 'q';
+
     notesRef.current.push({
       id: noteIdCounter.current++,
       def: activeNotePool[randomIndex],
       x: startX,
-      color: '#1e293b' // 기본 색상 (slate-800)
+      color: '#1e293b', // 기본 색상 (slate-800)
+      duration: selectedDuration
     });
-  }, [activeNotePool]);
+  }, [activeNotePool, randomBeats]);
 
   const triggerFeedback = useCallback((type: 'correct' | 'incorrect' | 'missed') => {
     setFeedback(type);
     if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
-    feedbackTimer.current = setTimeout(() => setFeedback('idle'), 300);
+    feedbackTimer.current = setTimeout(() => setFeedback('idle'), 350);
   }, []);
 
   const resetGame = useCallback(() => {
@@ -162,7 +175,7 @@ export default function App() {
     queueMicrotask(() => {
       resetGame();
     });
-  }, [range, useAccidentals, clef, resetGame]);
+  }, [range, useAccidentals, clef, randomBeats, resetGame]);
 
   // VexFlow 렌더링 루프
   useEffect(() => {
@@ -223,7 +236,7 @@ export default function App() {
         try {
           const note = new VF.StaveNote({ 
             keys: [noteInst.def.vfKey], 
-            duration: 'q', 
+            duration: noteInst.duration, 
             clef: clef 
           });
           
@@ -232,7 +245,7 @@ export default function App() {
           }
           
           const isTarget = index === 0;
-          const drawColor = isTarget ? noteInst.color : '#94a3b8'; // 뒤에 오는 음표는 흐린 색상
+          const drawColor = isTarget ? noteInst.color : '#787b7e'; // 뒤에 오는 음표는 흐린 색상
           
           note.setStyle({ fillStyle: drawColor, strokeStyle: drawColor });
           
@@ -243,7 +256,7 @@ export default function App() {
           note.setContext(context).draw();
         } catch(e) {
           // 렌더링 실패 무시 (드물게 발생하는 틱 에러 방지)
-          console.error(e);
+          console.warn('note render error:', e)
         }
       });
 
@@ -319,6 +332,30 @@ export default function App() {
                 <input 
                   type="checkbox" className="sr-only peer"
                   checked={useAccidentals} onChange={(e) => setUseAccidentals(e.target.checked)}
+                />
+                <div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-indigo-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+              </label>
+            </div>
+
+            {/* 박자 다양화 설정 */}
+            <div className="flex justify-between items-center bg-white p-3 rounded-lg border border-slate-200 shadow-sm">
+              <span className="text-sm font-semibold text-slate-700">다양한 박자 포함</span>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input 
+                  type="checkbox" className="sr-only peer"
+                  checked={randomBeats} onChange={(e) => setRandomBeats(e.target.checked)}
+                />
+                <div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-indigo-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+              </label>
+            </div>
+
+            {/* 표기 방식 설정 */}
+            <div className="flex justify-between items-center bg-white p-3 rounded-lg border border-slate-200 shadow-sm">
+              <span className="text-sm font-semibold text-slate-700">계이름(도레미) 표기</span>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input 
+                  type="checkbox" className="sr-only peer"
+                  checked={displayMode === 'solfege'} onChange={(e) => setDisplayMode(e.target.checked ? 'solfege' : 'alphabet')}
                 />
                 <div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-indigo-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
               </label>
@@ -425,7 +462,8 @@ export default function App() {
                         }
                       `}
                     >
-                      {key.id.split('/')[0]}<br/><span className="text-[10px] font-normal">{key.id.split('/')[1]}</span>
+                      {(displayMode === 'solfege' ? SOLFEGE_MAP[key.id] : key.id).split('/')[0]}<br/>
+                      <span className="text-[10px] font-normal">{(displayMode === 'solfege' ? SOLFEGE_MAP[key.id] : key.id).split('/')[1]}</span>
                     </button>
                   )
                 ))}
@@ -440,7 +478,7 @@ export default function App() {
                     disabled={!isVexLoaded}
                     className="w-[46px] h-14 bg-white border border-slate-300 rounded shadow-sm text-indigo-700 text-lg font-bold hover:bg-indigo-50 hover:border-indigo-400 active:bg-slate-100 active:scale-95 transition-all duration-75"
                   >
-                    {key}
+                    {displayMode === 'solfege' ? SOLFEGE_MAP[key] : key}
                   </button>
                 ))}
               </div>
