@@ -351,12 +351,22 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-200 flex flex-col items-center justify-center p-4 font-sans text-slate-800">
+      <style>
+        {`@import url('https://fonts.googleapis.com/css2?family=Indie+Flower&display=swap');`}
+      </style>
+      <h1 className="text-lg font-bold text-slate-800 flex items-center">
+        Musical
+        <span className="font-['Indie_Flower',_cursive] text-indigo-500 text-2xl mx-1.2 px-1">
+          "TEST"
+        </span>
+        Note
+      </h1>
       <div className="max-w-5xl w-full bg-white rounded-3xl shadow-xl overflow-hidden flex flex-col md:flex-row border border-slate-300">
         {/* 좌측: 설정 패널 */}
         <div className="w-full md:w-80 bg-slate-50 border-r border-slate-200 p-6 flex flex-col gap-6 max-h-screen overflow-y-auto">
           <div className="flex items-center gap-2 text-indigo-600 mb-2">
             <Settings2 className="w-6 h-6" />
-            <h2 className="text-xl font-bold">게임 설정</h2>
+            <h2 className="text-xl font-bold">설정</h2>
           </div>
 
           <div className="space-y-6">
