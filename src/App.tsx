@@ -3,7 +3,7 @@ import { Music, CheckCircle2, XCircle, RefreshCw, Settings2, AlertCircle } from 
 
 type NoteDef = {
   vfKey: string;
-  accidental: '' | '#' | 'b';
+  accidental: '' | '#' | 'b' | 'n';
   answerId: string;
 };
 
@@ -33,11 +33,11 @@ const SOLFEGE_MAP: Record<string, string> = {
 };
 
 const CANVAS_WIDTH = 400;
-const CANVAS_HEIGHT = 240; 
+const CANVAS_HEIGHT = 240;
 const START_X = 380;
 const END_X = 60;
 const STAVE_Y = 70;
-const NOTE_SPACING = 110; // 연속해서 나오는 음표 사이의 간격
+const NOTE_SPACING = 110;
 
 // 전체 생성 가능 음계 배열 (C2 ~ B6)
 const ALL_NOTES = Array.from({ length: 5 }, (_, i) => i + 2).flatMap(oct =>
@@ -49,25 +49,84 @@ const ALL_NOTES = Array.from({ length: 5 }, (_, i) => i + 2).flatMap(oct =>
   }))
 );
 
-// 동적 음표 풀 생성 함수
-const buildNotePool = (startIndex: number, endIndex: number, useAcc: boolean): NoteDef[] => {
+// 조표에 따른 샵/플랫 매핑 데이터
+const FLAT_KEYS = ['F', 'Bb', 'Eb', 'Ab'];
+const KEY_SIG_ALTERS: Record<string, Record<string, string>> = {
+  'C': {},
+  'G': { 'F': '#' },
+  'D': { 'F': '#', 'C': '#' },
+  'A': { 'F': '#', 'C': '#', 'G': '#' },
+  'E': { 'F': '#', 'C': '#', 'G': '#', 'D': '#' },
+  'B': { 'F': '#', 'C': '#', 'G': '#', 'D': '#', 'A': '#' },
+  'F': { 'B': 'b' },
+  'Bb': { 'B': 'b', 'E': 'b' },
+  'Eb': { 'B': 'b', 'E': 'b', 'A': 'b' },
+  'Ab': { 'B': 'b', 'E': 'b', 'A': 'b', 'D': 'b' },
+};
+
+// 정답 규격화 함수
+const getStandardAnswerId = (pitch: string): string => {
+  if (['C', 'D', 'E', 'F', 'G', 'A', 'B'].includes(pitch)) return pitch;
+  const map: Record<string, string> = {
+    'C#': 'C#/Db', 'Db': 'C#/Db',
+    'D#': 'D#/Eb', 'Eb': 'D#/Eb',
+    'F#': 'F#/Gb', 'Gb': 'F#/Gb',
+    'G#': 'G#/Ab', 'Ab': 'G#/Ab',
+    'A#': 'A#/Bb', 'Bb': 'A#/Bb',
+  };
+  return map[pitch] || pitch;
+};
+
+// 동적 음표 풀 생성 함수 (조표 기반 임시표 계산 적용)
+const buildNotePool = (startIndex: number, endIndex: number, useAcc: boolean, keySig: string): NoteDef[] => {
   const pool: NoteDef[] = [];
-  
+  const alters = KEY_SIG_ALTERS[keySig] || {};
+  const isFlatKey = FLAT_KEYS.includes(keySig);
+
   for (let i = startIndex; i <= endIndex; i++) {
     const noteInfo = ALL_NOTES[i];
-    const upper = noteInfo.baseNote.toUpperCase();
-    
-    // 기본 음표 추가
-    pool.push({ vfKey: `${noteInfo.baseNote}/${noteInfo.octave}`, accidental: '', answerId: upper });
-    
-    // 임시표 사용 시 추가 파생
+    const baseUpper = noteInfo.baseNote.toUpperCase();
+    const keyAccidental = alters[baseUpper]; // '#' or 'b' or undefined
+
+    // 1. 조표가 반영된 기본(Diatonic) 음표
+    let diatonicPitch = baseUpper;
+    if (keyAccidental) diatonicPitch += keyAccidental;
+
+    pool.push({
+      vfKey: `${noteInfo.baseNote}/${noteInfo.octave}`,
+      accidental: '', // 조표에 의해 자동 적용되므로 VexFlow 상의 임시표 표기는 없음
+      answerId: getStandardAnswerId(diatonicPitch)
+    });
+
+    // 2. 임시표(Accidental) 옵션 활성화 시 조표에 반하는 음표 추가
     if (useAcc) {
-      if (upper !== 'E' && upper !== 'B') {
-        const nextNoteInfo = ALL_NOTES[i + 1];
-        if (nextNoteInfo) {
-          const answerId = `${upper}#/${nextNoteInfo.baseNote.toUpperCase()}b`;
-          pool.push({ vfKey: `${noteInfo.baseNote}/${noteInfo.octave}`, accidental: '#', answerId });
-          pool.push({ vfKey: `${nextNoteInfo.baseNote}/${nextNoteInfo.octave}`, accidental: 'b', answerId });
+      if (keyAccidental) {
+        // 조표에 의해 #/b이 붙는 음표 -> 제자리표(n) 처리 파생
+        pool.push({
+          vfKey: `${noteInfo.baseNote}/${noteInfo.octave}`,
+          accidental: 'n',
+          answerId: baseUpper
+        });
+      } else {
+        // 조표에 영향을 받지 않는 음표 -> 조표의 계열(Sharp/Flat)에 따라 #/b 추가 파생
+        if (isFlatKey) {
+          // Cb(B), Fb(E) 와 같은 이명동음 혼란을 막기 위해 자주 쓰이는 음계만 추가
+          if (['D', 'E', 'G', 'A', 'B'].includes(baseUpper)) {
+            pool.push({
+              vfKey: `${noteInfo.baseNote}/${noteInfo.octave}`,
+              accidental: 'b',
+              answerId: getStandardAnswerId(baseUpper + 'b')
+            });
+          }
+        } else {
+          // E#(F), B#(C) 등 방지
+          if (['C', 'D', 'F', 'G', 'A'].includes(baseUpper)) {
+            pool.push({
+              vfKey: `${noteInfo.baseNote}/${noteInfo.octave}`,
+              accidental: '#',
+              answerId: getStandardAnswerId(baseUpper + '#')
+            });
+          }
         }
       }
     }
@@ -104,24 +163,25 @@ export default function App() {
   const [uiStreak, setUiStreak] = useState(0);
   const [feedback, setFeedback] = useState<'idle' | 'correct' | 'incorrect' | 'missed'>('idle');
   const [isVexLoaded, setIsVexLoaded] = useState(false);
-  
+
   // 로컬 스토리지 연동 상태
   const [speed, setSpeed] = useLocalStorage<number>({ key: 'music-app-speed', defaultValue: 1.5 });
   const [useAccidentals, setUseAccidentals] = useLocalStorage<boolean>({ key: 'music-app-accidentals', defaultValue: false });
   const [randomBeats, setRandomBeats] = useLocalStorage<boolean>({ key: 'music-app-beats', defaultValue: false });
   const [displayMode, setDisplayMode] = useLocalStorage<'alphabet' | 'solfege'>({ key: 'music-app-display-mode', defaultValue: 'alphabet' });
   const [clef, setClef] = useLocalStorage<'treble' | 'bass'>({ key: 'music-app-clef', defaultValue: 'treble' });
+  const [keySignature, setKeySignature] = useLocalStorage<string>({ key: 'music-app-keysig', defaultValue: 'C' });
   const [range, setRange] = useLocalStorage<[number, number]>({ key: 'music-app-range', defaultValue: [14, 28] }); 
-  
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const notesRef = useRef<NoteInstance[]>([]);
   const noteIdCounter = useRef(0);
   const speedRef = useRef(speed);
   const feedbackTimer = useRef<NodeJS.Timeout | null>(null);
-  
-  const activeNotePool = useMemo(() => 
-    buildNotePool(range[0], range[1], useAccidentals),
-  [range, useAccidentals]);
+
+  const activeNotePool = useMemo(() =>
+    buildNotePool(range[0], range[1], useAccidentals, keySignature),
+  [range, useAccidentals, keySignature]);
 
   useEffect(() => { speedRef.current = speed; }, [speed]);
 
@@ -144,7 +204,7 @@ export default function App() {
   const spawnNote = useCallback((startX = START_X) => {
     if (activeNotePool.length === 0) return;
     const randomIndex = Math.floor(Math.random() * activeNotePool.length);
-    
+
     const durations = ['w', 'h', 'q', '8'];
     const selectedDuration = randomBeats ? durations[Math.floor(Math.random() * durations.length)] : 'q';
 
@@ -152,7 +212,7 @@ export default function App() {
       id: noteIdCounter.current++,
       def: activeNotePool[randomIndex],
       x: startX,
-      color: '#1e293b', // 기본 색상 (slate-800)
+      color: '#1e293b',
       duration: selectedDuration
     });
   }, [activeNotePool, randomBeats]);
@@ -175,12 +235,12 @@ export default function App() {
     queueMicrotask(() => {
       resetGame();
     });
-  }, [range, useAccidentals, clef, randomBeats, resetGame]);
+  }, [range, useAccidentals, clef, keySignature, randomBeats, resetGame]);
 
   // VexFlow 렌더링 루프
   useEffect(() => {
     if (!isVexLoaded || !canvasRef.current || activeNotePool.length === 0) return;
-    
+
     if (notesRef.current.length === 0) {
       queueMicrotask(() => {
         spawnNote(START_X);
@@ -191,7 +251,7 @@ export default function App() {
     const VF = (window as any).Vex.Flow;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
-    
+
     const renderer = new VF.Renderer(canvas, VF.Renderer.Backends.CANVAS);
     renderer.resize(CANVAS_WIDTH, CANVAS_HEIGHT);
     const context = renderer.getContext();
@@ -217,7 +277,7 @@ export default function App() {
         ctx.save();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        
+
         ctx.beginPath();
         ctx.setLineDash([4, 4]);
         ctx.moveTo(END_X, 20);
@@ -230,32 +290,32 @@ export default function App() {
 
       const stave = new VF.Stave(10, STAVE_Y, CANVAS_WIDTH - 20);
       stave.addClef(clef);
+      stave.addKeySignature(keySignature);
       stave.setContext(context).draw();
 
       notesRef.current.forEach((noteInst, index) => {
         try {
-          const note = new VF.StaveNote({ 
-            keys: [noteInst.def.vfKey], 
-            duration: noteInst.duration, 
-            clef: clef 
+          const note = new VF.StaveNote({
+            keys: [noteInst.def.vfKey],
+            duration: noteInst.duration,
+            clef: clef
           });
-          
+
           if (noteInst.def.accidental !== '') {
             note.addModifier(new VF.Accidental(noteInst.def.accidental), 0);
           }
-          
+
           const isTarget = index === 0;
-          const drawColor = isTarget ? noteInst.color : '#787b7e'; // 뒤에 오는 음표는 흐린 색상
-          
+          const drawColor = isTarget ? noteInst.color : '#787b7e'; 
+
           note.setStyle({ fillStyle: drawColor, strokeStyle: drawColor });
-          
+
           const tc = new VF.TickContext();
           tc.setX(noteInst.x);
           note.setTickContext(tc);
           note.setStave(stave);
           note.setContext(context).draw();
         } catch(e) {
-          // 렌더링 실패 무시 (드물게 발생하는 틱 에러 방지)
           console.warn('note render error:', e)
         }
       });
@@ -265,7 +325,7 @@ export default function App() {
 
     renderLoop();
     return () => cancelAnimationFrame(animationFrameId);
-  }, [isVexLoaded, activeNotePool, clef, spawnNote, triggerFeedback]);
+  }, [isVexLoaded, activeNotePool, clef, keySignature, spawnNote, triggerFeedback]);
 
   const handleGuess = (guessedId: string) => {
     if (notesRef.current.length === 0) return;
@@ -276,15 +336,14 @@ export default function App() {
       triggerFeedback('correct');
       setUiScore(prev => prev + 10);
       setUiStreak(prev => prev + 1);
-      notesRef.current.shift(); // 맞춘 음표 즉시 삭제
+      notesRef.current.shift();
     } else {
       triggerFeedback('incorrect');
       setUiStreak(0);
-      targetNote.color = "#ef4444"; // 오답 시 붉은색으로 유지
+      targetNote.color = "#ef4444";
     }
   };
 
-  // 커스텀 이중 슬라이더 렌더링 값 계산
   const MIN = 0;
   const MAX = ALL_NOTES.length - 1;
   const minPercent = ((range[0] - MIN) / (MAX - MIN)) * 100;
@@ -293,9 +352,8 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-200 flex flex-col items-center justify-center p-4 font-sans text-slate-800">
       <div className="max-w-5xl w-full bg-white rounded-3xl shadow-xl overflow-hidden flex flex-col md:flex-row border border-slate-300">
-        
         {/* 좌측: 설정 패널 */}
-        <div className="w-full md:w-80 bg-slate-50 border-r border-slate-200 p-6 flex flex-col gap-6">
+        <div className="w-full md:w-80 bg-slate-50 border-r border-slate-200 p-6 flex flex-col gap-6 max-h-screen overflow-y-auto">
           <div className="flex items-center gap-2 text-indigo-600 mb-2">
             <Settings2 className="w-6 h-6" />
             <h2 className="text-xl font-bold">게임 설정</h2>
@@ -305,31 +363,52 @@ export default function App() {
             {/* 속도 설정 */}
             <div>
               <label className="text-sm font-semibold text-slate-700 block mb-2">이동 속도: {speed.toFixed(1)}x</label>
-              <input 
-                type="range" min="0.5" max="4" step="0.1" 
+              <input
+                type="range" min="0.5" max="4" step="0.1"
                 value={speed} onChange={(e) => setSpeed(Number(e.target.value))}
                 className="w-full accent-indigo-500"
               />
             </div>
 
             {/* 음자리표 설정 */}
-            <div>
-              <label className="text-sm font-semibold text-slate-700 block mb-2">음자리표 (Clef)</label>
-              <select 
-                value={clef} 
-                onChange={(e) => setClef(e.target.value as 'treble' | 'bass')}
-                className="w-full border border-slate-300 rounded-md p-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              >
-                <option value="treble">높은음자리표 (Treble)</option>
-                <option value="bass">낮은음자리표 (Bass)</option>
-              </select>
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <label className="text-sm font-semibold text-slate-700 block mb-2">음자리표</label>
+                <select
+                  value={clef}
+                  onChange={(e) => setClef(e.target.value as 'treble' | 'bass')}
+                  className="w-full border border-slate-300 rounded-md p-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="treble">높은음 (Treble)</option>
+                  <option value="bass">낮은음 (Bass)</option>
+                </select>
+              </div>
+              <div className="flex-1">
+                <label className="text-sm font-semibold text-slate-700 block mb-2">조표 (Key)</label>
+                <select
+                  value={keySignature}
+                  onChange={(e) => setKeySignature(e.target.value)}
+                  className="w-full border border-slate-300 rounded-md p-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="C">C Major</option>
+                  <option value="G">G Major (1#)</option>
+                  <option value="D">D Major (2#)</option>
+                  <option value="A">A Major (3#)</option>
+                  <option value="E">E Major (4#)</option>
+                  <option value="B">B Major (5#)</option>
+                  <option value="F">F Major (1b)</option>
+                  <option value="Bb">Bb Major (2b)</option>
+                  <option value="Eb">Eb Major (3b)</option>
+                  <option value="Ab">Ab Major (4b)</option>
+                </select>
+              </div>
             </div>
 
-            {/* 샾/플랫 설정 */}
+            {/* 임시표 설정 */}
             <div className="flex justify-between items-center bg-white p-3 rounded-lg border border-slate-200 shadow-sm">
               <span className="text-sm font-semibold text-slate-700">임시표(#/b) 포함</span>
               <label className="relative inline-flex items-center cursor-pointer">
-                <input 
+                <input
                   type="checkbox" className="sr-only peer"
                   checked={useAccidentals} onChange={(e) => setUseAccidentals(e.target.checked)}
                 />
@@ -341,7 +420,7 @@ export default function App() {
             <div className="flex justify-between items-center bg-white p-3 rounded-lg border border-slate-200 shadow-sm">
               <span className="text-sm font-semibold text-slate-700">다양한 박자 포함</span>
               <label className="relative inline-flex items-center cursor-pointer">
-                <input 
+                <input
                   type="checkbox" className="sr-only peer"
                   checked={randomBeats} onChange={(e) => setRandomBeats(e.target.checked)}
                 />
@@ -353,7 +432,7 @@ export default function App() {
             <div className="flex justify-between items-center bg-white p-3 rounded-lg border border-slate-200 shadow-sm">
               <span className="text-sm font-semibold text-slate-700">계이름(도레미) 표기</span>
               <label className="relative inline-flex items-center cursor-pointer">
-                <input 
+                <input
                   type="checkbox" className="sr-only peer"
                   checked={displayMode === 'solfege'} onChange={(e) => setDisplayMode(e.target.checked ? 'solfege' : 'alphabet')}
                 />
@@ -364,15 +443,15 @@ export default function App() {
             {/* 이중 슬라이더 기반 음역대 설정 */}
             <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm space-y-4">
               <span className="text-sm font-semibold text-slate-700 block border-b pb-2 mb-2">음역대 지정 범위</span>
-              
+
               <div className="relative pt-4 pb-2">
                 <div className="relative w-full h-2 bg-slate-200 rounded-full flex items-center">
-                  <div 
-                    className="absolute h-2 bg-indigo-500 rounded-full pointer-events-none" 
-                    style={{ left: `${minPercent}%`, width: `${maxPercent - minPercent}%` }} 
+                  <div
+                    className="absolute h-2 bg-indigo-500 rounded-full pointer-events-none"
+                    style={{ left: `${minPercent}%`, width: `${maxPercent - minPercent}%` }}
                   />
-                  
-                  <input 
+
+                  <input
                     type="range" min={MIN} max={MAX} value={range[0]}
                     onChange={(e) => {
                       const val = Math.min(Number(e.target.value), range[1] - 1);
@@ -381,8 +460,8 @@ export default function App() {
                     className="absolute w-full appearance-none bg-transparent pointer-events-none z-20
                       [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-indigo-600 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-grab"
                   />
-                  
-                  <input 
+
+                  <input
                     type="range" min={MIN} max={MAX} value={range[1]}
                     onChange={(e) => {
                       const val = Math.max(Number(e.target.value), range[0] + 1);
@@ -406,11 +485,11 @@ export default function App() {
 
         {/* 우측: 게임 화면 */}
         <div className="flex-1 flex flex-col bg-white relative">
-          
+
           <div className="flex justify-between items-center p-4 border-b border-slate-100 bg-white">
             <div className="flex items-center gap-2">
               <Music className="w-5 h-5 text-indigo-600" />
-              <h1 className="text-lg font-bold text-slate-800">슬라이딩 음표 읽기</h1>
+              <h1 className="text-lg font-bold text-slate-800">테스트</h1>
             </div>
             <div className="flex items-center gap-6">
               <div className="text-sm font-semibold text-slate-600">
@@ -427,7 +506,7 @@ export default function App() {
 
           <div className="py-4 flex flex-col items-center justify-center relative flex-1 min-h-[260px] bg-white overflow-hidden">
             <canvas ref={canvasRef} className="block" width={CANVAS_WIDTH} height={CANVAS_HEIGHT} style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT }} />
-            
+
             {!isVexLoaded && (
               <div className="absolute inset-0 flex items-center justify-center bg-white/90">
                 <span className="text-sm font-medium text-indigo-500 animate-pulse">악보 엔진 로딩 중...</span>
@@ -456,8 +535,8 @@ export default function App() {
                       disabled={!isVexLoaded || !useAccidentals}
                       className={`
                         w-[46px] h-12 rounded text-xs font-bold transition-all duration-75
-                        ${useAccidentals 
-                          ? 'bg-slate-800 text-white hover:bg-slate-700 active:bg-slate-900 active:scale-95 shadow-md' 
+                        ${useAccidentals
+                          ? 'bg-slate-800 text-white hover:bg-slate-700 active:bg-slate-900 active:scale-95 shadow-md'
                           : 'bg-slate-300 text-slate-400 cursor-not-allowed opacity-50'
                         }
                       `}
@@ -468,7 +547,7 @@ export default function App() {
                   )
                 ))}
               </div>
-              
+
               {/* 흰 건반 */}
               <div className="flex justify-center gap-2">
                 {WHITE_KEYS.map((key) => (
