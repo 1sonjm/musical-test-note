@@ -7,6 +7,14 @@ type NoteDef = {
   answerId: string;
 };
 
+// 개별 렌더링될 음표 인스턴스의 타입 정의
+type NoteInstance = {
+  id: number;
+  def: NoteDef;
+  x: number;
+  color: string;
+};
+
 // UI 렌더링용 상수
 const WHITE_KEYS = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
 const BLACK_KEYS = [
@@ -23,6 +31,7 @@ const CANVAS_HEIGHT = 240;
 const START_X = 380;
 const END_X = 60;
 const STAVE_Y = 70;
+const NOTE_SPACING = 110; // 연속해서 나오는 음표 사이의 간격
 
 // 전체 생성 가능 음계 배열 (C2 ~ B6)
 const ALL_NOTES = Array.from({ length: 5 }, (_, i) => i + 2).flatMap(oct =>
@@ -97,10 +106,10 @@ export default function App() {
   const [range, setRange] = useLocalStorage<[number, number]>({ key: 'music-app-range', defaultValue: [14, 28] }); 
   
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const currentNoteRef = useRef<NoteDef | null>(null);
-  const noteXRef = useRef(START_X);
-  const noteColorRef = useRef("black");
+  const notesRef = useRef<NoteInstance[]>([]);
+  const noteIdCounter = useRef(0);
   const speedRef = useRef(speed);
+  const feedbackTimer = useRef<NodeJS.Timeout | null>(null);
   
   const activeNotePool = useMemo(() => 
     buildNotePool(range[0], range[1], useAccidentals),
@@ -110,7 +119,6 @@ export default function App() {
 
   // VexFlow 동적 로드
   useEffect(() => {
-    // 상태 업데이트를 마이크로태스크로 예약하여 동기적 렌더링 사이클을 방해하지 않도록 합니다.
     queueMicrotask(() => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       if ((window as any).Vex) {
@@ -125,39 +133,44 @@ export default function App() {
     });
   }, []);
 
-  const generateRandomNote = useCallback(() => {
+  const spawnNote = useCallback((startX = START_X) => {
     if (activeNotePool.length === 0) return;
     const randomIndex = Math.floor(Math.random() * activeNotePool.length);
-    currentNoteRef.current = activeNotePool[randomIndex];
-    noteXRef.current = START_X;
-    noteColorRef.current = "black";
-    setFeedback('idle');
+    notesRef.current.push({
+      id: noteIdCounter.current++,
+      def: activeNotePool[randomIndex],
+      x: startX,
+      color: '#1e293b' // 기본 색상 (slate-800)
+    });
   }, [activeNotePool]);
+
+  const triggerFeedback = useCallback((type: 'correct' | 'incorrect' | 'missed') => {
+    setFeedback(type);
+    if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
+    feedbackTimer.current = setTimeout(() => setFeedback('idle'), 300);
+  }, []);
+
+  const resetGame = useCallback(() => {
+    setUiScore(0);
+    setUiStreak(0);
+    notesRef.current = [];
+    spawnNote(START_X);
+  }, [spawnNote]);
 
   // 설정 변경 시 진행도 초기화
   useEffect(() => {
-    // 상태 업데이트를 마이크로태스크로 예약하여 동기적 렌더링 사이클을 방해하지 않도록 합니다.
     queueMicrotask(() => {
-      generateRandomNote();
-      setUiScore(0);
-      setUiStreak(0);
+      resetGame();
     });
-  }, [range, useAccidentals, clef, generateRandomNote]);
-
-  const resetGame = () => {
-    setUiScore(0);
-    setUiStreak(0);
-    generateRandomNote();
-  };
+  }, [range, useAccidentals, clef, resetGame]);
 
   // VexFlow 렌더링 루프
   useEffect(() => {
     if (!isVexLoaded || !canvasRef.current || activeNotePool.length === 0) return;
     
-    if (!currentNoteRef.current || !activeNotePool.includes(currentNoteRef.current)) {
-      // 상태 업데이트를 마이크로태스크로 예약합니다.
+    if (notesRef.current.length === 0) {
       queueMicrotask(() => {
-        generateRandomNote();
+        spawnNote(START_X);
       });
     }
 
@@ -174,12 +187,17 @@ export default function App() {
     let animationFrameId: number;
 
     const renderLoop = () => {
-      noteXRef.current -= speedRef.current;
+      notesRef.current.forEach(n => n.x -= speedRef.current);
 
-      if (noteXRef.current <= END_X) {
-        setFeedback('missed');
+      if (notesRef.current.length > 0 && notesRef.current[0].x <= END_X) {
+        notesRef.current.shift();
+        triggerFeedback('missed');
         setUiStreak(0);
-        generateRandomNote();
+      }
+
+      const lastNote = notesRef.current[notesRef.current.length - 1];
+      if (!lastNote || lastNote.x <= START_X - NOTE_SPACING) {
+        spawnNote(START_X);
       }
 
       if (ctx) {
@@ -201,49 +219,55 @@ export default function App() {
       stave.addClef(clef);
       stave.setContext(context).draw();
 
-      if (currentNoteRef.current) {
+      notesRef.current.forEach((noteInst, index) => {
         try {
           const note = new VF.StaveNote({ 
-            keys: [currentNoteRef.current.vfKey], 
+            keys: [noteInst.def.vfKey], 
             duration: 'q', 
             clef: clef 
           });
           
-          if (currentNoteRef.current.accidental !== '') {
-            note.addModifier(new VF.Accidental(currentNoteRef.current.accidental), 0);
+          if (noteInst.def.accidental !== '') {
+            note.addModifier(new VF.Accidental(noteInst.def.accidental), 0);
           }
           
-          note.setStyle({ fillStyle: noteColorRef.current, strokeStyle: noteColorRef.current });
+          const isTarget = index === 0;
+          const drawColor = isTarget ? noteInst.color : '#94a3b8'; // 뒤에 오는 음표는 흐린 색상
+          
+          note.setStyle({ fillStyle: drawColor, strokeStyle: drawColor });
           
           const tc = new VF.TickContext();
-          tc.setX(noteXRef.current);
+          tc.setX(noteInst.x);
           note.setTickContext(tc);
           note.setStave(stave);
           note.setContext(context).draw();
         } catch(e) {
-          console.error("음표 렌더링 에러:", e);
+          // 렌더링 실패 무시 (드물게 발생하는 틱 에러 방지)
+          console.error(e);
         }
-      }
+      });
 
       animationFrameId = requestAnimationFrame(renderLoop);
     };
 
     renderLoop();
     return () => cancelAnimationFrame(animationFrameId);
-  }, [isVexLoaded, generateRandomNote, activeNotePool, clef]);
+  }, [isVexLoaded, activeNotePool, clef, spawnNote, triggerFeedback]);
 
   const handleGuess = (guessedId: string) => {
-    if (!currentNoteRef.current || feedback === 'correct') return;
+    if (notesRef.current.length === 0) return;
 
-    if (guessedId === currentNoteRef.current.answerId) {
-      setFeedback('correct');
+    const targetNote = notesRef.current[0];
+
+    if (guessedId === targetNote.def.answerId) {
+      triggerFeedback('correct');
       setUiScore(prev => prev + 10);
       setUiStreak(prev => prev + 1);
-      generateRandomNote();
+      notesRef.current.shift(); // 맞춘 음표 즉시 삭제
     } else {
-      setFeedback('incorrect');
+      triggerFeedback('incorrect');
       setUiStreak(0);
-      noteColorRef.current = "#ef4444";
+      targetNote.color = "#ef4444"; // 오답 시 붉은색으로 유지
     }
   };
 
@@ -394,9 +418,9 @@ export default function App() {
                       onClick={() => handleGuess(key.id)}
                       disabled={!isVexLoaded || !useAccidentals}
                       className={`
-                        w-[46px] h-12 rounded text-xs font-bold transition-all duration-150
+                        w-[46px] h-12 rounded text-xs font-bold transition-all duration-75
                         ${useAccidentals 
-                          ? 'bg-slate-800 text-white hover:bg-slate-700 active:bg-slate-900 shadow-md' 
+                          ? 'bg-slate-800 text-white hover:bg-slate-700 active:bg-slate-900 active:scale-95 shadow-md' 
                           : 'bg-slate-300 text-slate-400 cursor-not-allowed opacity-50'
                         }
                       `}
@@ -414,7 +438,7 @@ export default function App() {
                     key={key}
                     onClick={() => handleGuess(key)}
                     disabled={!isVexLoaded}
-                    className="w-[46px] h-14 bg-white border border-slate-300 rounded shadow-sm text-indigo-700 text-lg font-bold hover:bg-indigo-50 hover:border-indigo-400 active:bg-slate-100 transition-all duration-150"
+                    className="w-[46px] h-14 bg-white border border-slate-300 rounded shadow-sm text-indigo-700 text-lg font-bold hover:bg-indigo-50 hover:border-indigo-400 active:bg-slate-100 active:scale-95 transition-all duration-75"
                   >
                     {key}
                   </button>
