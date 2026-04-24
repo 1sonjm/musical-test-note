@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Music, CheckCircle2, XCircle, RefreshCw, Settings2, AlertCircle } from 'lucide-react';
+import { Music, CheckCircle2, XCircle, RefreshCw, Settings2, AlertCircle, X, Volume2, VolumeX, MousePointerClick } from 'lucide-react';
 
 type NoteDef = {
   vfKey: string;
@@ -141,7 +141,7 @@ function useLocalStorage<T>({ key, defaultValue }: { key: string, defaultValue: 
       const item = window.localStorage.getItem(key);
       return item ? JSON.parse(item) : defaultValue;
     } catch (error) {
-      console.error('[useLocalStorage] init error:', error)
+      console.error(`[useLocalStorage] init error (${key}):`, error)
       return defaultValue;
     }
   });
@@ -150,7 +150,7 @@ function useLocalStorage<T>({ key, defaultValue }: { key: string, defaultValue: 
     try {
       window.localStorage.setItem(key, JSON.stringify(state));
     } catch (error) {
-      console.error('[useLocalStorage] update error:', error)
+      console.error(`[useLocalStorage] update error (${key}):`, error);
     }
   }, [key, state]);
 
@@ -161,38 +161,146 @@ function useLocalStorage<T>({ key, defaultValue }: { key: string, defaultValue: 
 export default function App() {
   const [uiScore, setUiScore] = useState(0);
   const [uiStreak, setUiStreak] = useState(0);
-  const [feedback, setFeedback] = useState<'idle' | 'correct' | 'incorrect' | 'missed'>('idle');
+  const [feedback, setFeedback] = useState<{ status: 'idle' | 'correct' | 'incorrect' | 'missed', message: string }>({ status: 'idle', message: '' });
   const [isVexLoaded, setIsVexLoaded] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  
+  const [currentBeat, setCurrentBeat] = useState(0);
+  const [soundEnabled, setSoundEnabled] = useState(false);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  
+  // 싱크 조정을 위한 탭 타이밍 상태
+  const tapDeltasRef = useRef<number[]>([]);
+  const lastVisualBeatTimeRef = useRef<number>(0);
+  const [syncMessage, setSyncMessage] = useState<string>('');
+  const tapTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // 로컬 스토리지 연동 상태
-  const [speed, setSpeed] = useLocalStorage<number>({ key: 'music-app-speed', defaultValue: 1.5 });
+  // 초기 시간 설정
+  useEffect(() => {
+    lastVisualBeatTimeRef.current = Date.now();
+  }, []);
+
+  const [bpm, setBpm] = useLocalStorage<number>({ key: 'music-app-bpm', defaultValue: 60 });
+  const [syncOffset, setSyncOffset] = useLocalStorage<number>({ key: 'music-app-sync-offset', defaultValue: 0 }); // 양수: 오디오 지연, 음수: 시각 지연
   const [useAccidentals, setUseAccidentals] = useLocalStorage<boolean>({ key: 'music-app-accidentals', defaultValue: false });
   const [randomBeats, setRandomBeats] = useLocalStorage<boolean>({ key: 'music-app-beats', defaultValue: false });
   const [displayMode, setDisplayMode] = useLocalStorage<'alphabet' | 'solfege'>({ key: 'music-app-display-mode', defaultValue: 'alphabet' });
   const [clef, setClef] = useLocalStorage<'treble' | 'bass'>({ key: 'music-app-clef', defaultValue: 'treble' });
   const [keySignature, setKeySignature] = useLocalStorage<string>({ key: 'music-app-keysig', defaultValue: 'C' });
   const [range, setRange] = useLocalStorage<[number, number]>({ key: 'music-app-range', defaultValue: [14, 28] }); 
-
+  
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const notesRef = useRef<NoteInstance[]>([]);
   const noteIdCounter = useRef(0);
-  const speedRef = useRef(speed);
   const feedbackTimer = useRef<NodeJS.Timeout | null>(null);
+  
+  const calculatedSpeed = useMemo(() => (NOTE_SPACING * bpm) / 3600, [bpm]);
+  const speedRef = useRef(calculatedSpeed);
+  useEffect(() => { speedRef.current = calculatedSpeed; }, [calculatedSpeed]);
 
-  const activeNotePool = useMemo(() =>
-    buildNotePool(range[0], range[1], useAccidentals, keySignature),
-  [range, useAccidentals, keySignature]);
+  const soundEnabledRef = useRef(soundEnabled);
+  useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
+  
+  const syncOffsetRef = useRef(syncOffset);
+  useEffect(() => { syncOffsetRef.current = syncOffset; }, [syncOffset]);
 
-  useEffect(() => { speedRef.current = speed; }, [speed]);
+  const activeNotePool = useMemo(() => buildNotePool(range[0], range[1], useAccidentals, keySignature), [range, useAccidentals, keySignature]);
 
-  // VexFlow 동적 로드
+  // 싱크 조정을 위한 탭 템포 처리
+  const handleSyncTap = useCallback(() => {
+    const now = Date.now();
+    const beatInterval = 60000 / bpm;
+    const timeSinceLastVisual = now - lastVisualBeatTimeRef.current;
+
+    let delta = timeSinceLastVisual;
+    if (delta > beatInterval / 2) {
+      delta -= beatInterval; 
+    }
+
+    tapDeltasRef.current.push(delta);
+
+    if (tapTimeoutRef.current) clearTimeout(tapTimeoutRef.current);
+
+    setSyncMessage('싱크 중...');
+
+    tapTimeoutRef.current = setTimeout(() => {
+      const deltas = tapDeltasRef.current;
+      if (deltas.length > 0) {
+        const avgDelta = deltas.reduce((a, b) => a + b, 0) / deltas.length;
+        setSyncOffset(prev => {
+          const newOffset = Math.round(prev + avgDelta);
+          return Math.max(-500, Math.min(500, newOffset));
+        });
+        setSyncMessage(`싱크 완료: ${syncOffset}ms`);
+      } else {
+        setSyncMessage('');
+      }
+      tapDeltasRef.current = [];
+      setTimeout(() => setSyncMessage(''), 2000);
+    }, 5000);
+  }, [bpm, setSyncOffset, syncOffset]);
+
+  const playBeatSound = useCallback((isAccent: boolean) => {
+    if (!audioCtxRef.current) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    const ctx = audioCtxRef.current;
+    if (ctx.state === 'suspended') ctx.resume();
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.frequency.value = isAccent ? 1200 : 800; 
+    osc.type = 'sine';
+
+    gain.gain.setValueAtTime(0.5, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.1);
+
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.1);
+  }, []);
+
+  // 메트로놈 루프 (오프셋 기반 시각/청각 지연 처리)
+  useEffect(() => {
+    const beatInterval = 60000 / bpm;
+    let beatCounter = 0;
+
+    const intervalId = setInterval(() => {
+      const currentCount = beatCounter++;
+      const visualBeat = currentCount % 4;
+      const audioBeat = currentCount % 4;
+      const offset = syncOffsetRef.current;
+
+      if (offset >= 0) {
+        // 시각 효과 우선, 오디오 지연
+        setCurrentBeat(visualBeat);
+        lastVisualBeatTimeRef.current = Date.now();
+        if (soundEnabledRef.current) {
+          setTimeout(() => playBeatSound(audioBeat === 3), offset);
+        }
+      } else {
+        // 오디오 우선, 시각 효과 지연
+        if (soundEnabledRef.current) {
+          playBeatSound(audioBeat === 3);
+        }
+        setTimeout(() => {
+          setCurrentBeat(visualBeat);
+          lastVisualBeatTimeRef.current = Date.now();
+        }, -offset);
+      }
+    }, beatInterval);
+
+    return () => clearInterval(intervalId);
+  }, [bpm, playBeatSound]);
+
   useEffect(() => {
     queueMicrotask(() => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if ((window as any).Vex) {
-        setIsVexLoaded(true);
-        return;
-      }
+      if ((window as any).Vex) { setIsVexLoaded(true); return; }
       const script = document.createElement('script');
       script.src = 'https://cdnjs.cloudflare.com/ajax/libs/vexflow/3.0.9/vexflow-min.js';
       script.async = true;
@@ -204,7 +312,6 @@ export default function App() {
   const spawnNote = useCallback((startX = START_X) => {
     if (activeNotePool.length === 0) return;
     const randomIndex = Math.floor(Math.random() * activeNotePool.length);
-
     const durations = ['w', 'h', 'q', '8'];
     const selectedDuration = randomBeats ? durations[Math.floor(Math.random() * durations.length)] : 'q';
 
@@ -217,10 +324,10 @@ export default function App() {
     });
   }, [activeNotePool, randomBeats]);
 
-  const triggerFeedback = useCallback((type: 'correct' | 'incorrect' | 'missed') => {
-    setFeedback(type);
+  const triggerFeedback = useCallback((status: 'correct' | 'incorrect' | 'missed', message: string) => {
+    setFeedback({ status, message });
     if (feedbackTimer.current) clearTimeout(feedbackTimer.current);
-    feedbackTimer.current = setTimeout(() => setFeedback('idle'), 350);
+    feedbackTimer.current = setTimeout(() => setFeedback({ status: 'idle', message: '' }), 350);
   }, []);
 
   const resetGame = useCallback(() => {
@@ -230,28 +337,16 @@ export default function App() {
     spawnNote(START_X);
   }, [spawnNote]);
 
-  // 설정 변경 시 진행도 초기화
-  useEffect(() => {
-    queueMicrotask(() => {
-      resetGame();
-    });
-  }, [range, useAccidentals, clef, keySignature, randomBeats, resetGame]);
+  useEffect(() => { queueMicrotask(resetGame); }, [range, useAccidentals, clef, keySignature, randomBeats, resetGame]);
 
-  // VexFlow 렌더링 루프
   useEffect(() => {
     if (!isVexLoaded || !canvasRef.current || activeNotePool.length === 0) return;
-
-    if (notesRef.current.length === 0) {
-      queueMicrotask(() => {
-        spawnNote(START_X);
-      });
-    }
+    if (notesRef.current.length === 0) queueMicrotask(() => spawnNote(START_X));
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const VF = (window as any).Vex.Flow;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d');
-
     const renderer = new VF.Renderer(canvas, VF.Renderer.Backends.CANVAS);
     renderer.resize(CANVAS_WIDTH, CANVAS_HEIGHT);
     const context = renderer.getContext();
@@ -263,8 +358,11 @@ export default function App() {
       notesRef.current.forEach(n => n.x -= speedRef.current);
 
       if (notesRef.current.length > 0 && notesRef.current[0].x <= END_X) {
-        notesRef.current.shift();
-        triggerFeedback('missed');
+        const missedNote = notesRef.current.shift();
+        if (missedNote) {
+          const ans = missedNote.def.answerId;
+          triggerFeedback('missed', `${ans} (${SOLFEGE_MAP[ans]})`);
+        }
         setUiStreak(0);
       }
 
@@ -277,7 +375,7 @@ export default function App() {
         ctx.save();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-
+        
         ctx.beginPath();
         ctx.setLineDash([4, 4]);
         ctx.moveTo(END_X, 20);
@@ -295,28 +393,20 @@ export default function App() {
 
       notesRef.current.forEach((noteInst, index) => {
         try {
-          const note = new VF.StaveNote({
-            keys: [noteInst.def.vfKey],
-            duration: noteInst.duration,
-            clef: clef
-          });
-
-          if (noteInst.def.accidental !== '') {
-            note.addModifier(new VF.Accidental(noteInst.def.accidental), 0);
-          }
-
+          const note = new VF.StaveNote({ keys: [noteInst.def.vfKey], duration: noteInst.duration, clef: clef });
+          if (noteInst.def.accidental !== '') note.addModifier(new VF.Accidental(noteInst.def.accidental), 0);
+          
           const isTarget = index === 0;
           const drawColor = isTarget ? noteInst.color : '#787b7e'; 
-
           note.setStyle({ fillStyle: drawColor, strokeStyle: drawColor });
-
+          
           const tc = new VF.TickContext();
           tc.setX(noteInst.x);
           note.setTickContext(tc);
           note.setStave(stave);
           note.setContext(context).draw();
         } catch(e) {
-          console.warn('note render error:', e)
+          console.error('Error rendering note:', e);
         }
       });
 
@@ -331,16 +421,18 @@ export default function App() {
     if (notesRef.current.length === 0) return;
 
     const targetNote = notesRef.current[0];
+    const ans = targetNote.def.answerId;
+    const feedbackMessage = `${ans} (${SOLFEGE_MAP[ans]})`;
 
-    if (guessedId === targetNote.def.answerId) {
-      triggerFeedback('correct');
+    if (guessedId === ans) {
+      triggerFeedback('correct', feedbackMessage);
       setUiScore(prev => prev + 10);
       setUiStreak(prev => prev + 1);
-      notesRef.current.shift();
+      notesRef.current.shift(); 
     } else {
-      triggerFeedback('incorrect');
+      triggerFeedback('incorrect', feedbackMessage);
       setUiStreak(0);
-      targetNote.color = "#ef4444";
+      targetNote.color = "#ef4444"; 
     }
   };
 
@@ -350,231 +442,232 @@ export default function App() {
   const maxPercent = ((range[1] - MIN) / (MAX - MIN)) * 100;
 
   return (
-    <div className="min-h-screen bg-slate-200 flex flex-col items-center justify-center p-4 font-sans text-slate-800">
-      <style>
-        {`@import url('https://fonts.googleapis.com/css2?family=Indie+Flower&display=swap');`}
-      </style>
-      <h1 className="text-lg font-bold text-slate-800 flex items-center">
-        Musical
-        <span className="font-['Indie_Flower',_cursive] text-indigo-500 text-2xl mx-1.2 px-1">
-          "TEST"
-        </span>
-        Note
-      </h1>
-      <div className="max-w-5xl w-full bg-white rounded-3xl shadow-xl overflow-hidden flex flex-col md:flex-row border border-slate-300">
-        {/* 좌측: 설정 패널 */}
-        <div className="w-full md:w-80 bg-slate-50 border-r border-slate-200 p-6 flex flex-col gap-6 max-h-screen overflow-y-auto">
-          <div className="flex items-center gap-2 text-indigo-600 mb-2">
-            <Settings2 className="w-6 h-6" />
-            <h2 className="text-xl font-bold">설정</h2>
+    <div className="min-h-screen bg-slate-200 flex flex-col items-center justify-center p-4 font-sans text-slate-800 user-select-none">
+      <div className="max-w-[440px] w-full bg-white rounded-3xl shadow-xl overflow-hidden flex flex-col border border-slate-300 relative">
+        
+        {/* 상단 점수 및 타이틀 헤더 */}
+        <div className="flex justify-between items-center px-5 py-4 border-b border-slate-100 bg-white">
+          <div className="flex items-center gap-1">
+            <Music className="w-5 h-5 text-indigo-600" />
+            <h1 className="text-lg font-bold text-slate-800 flex items-center whitespace-nowrap">
+              Musical 
+              <span className="font-[cursive] italic text-indigo-500 text-xl mx-1 translate-y-[-2px]">"TEST"</span> 
+              Note
+            </h1>
           </div>
-
-          <div className="space-y-6">
-            {/* 속도 설정 */}
-            <div>
-              <label className="text-sm font-semibold text-slate-700 block mb-2">이동 속도: {speed.toFixed(1)}x</label>
-              <input
-                type="range" min="0.5" max="4" step="0.1"
-                value={speed} onChange={(e) => setSpeed(Number(e.target.value))}
-                className="w-full accent-indigo-500"
-              />
-            </div>
-
-            {/* 음자리표 설정 */}
-            <div className="flex gap-2">
-              <div className="flex-1">
-                <label className="text-sm font-semibold text-slate-700 block mb-2">음자리표</label>
-                <select
-                  value={clef}
-                  onChange={(e) => setClef(e.target.value as 'treble' | 'bass')}
-                  className="w-full border border-slate-300 rounded-md p-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                >
-                  <option value="treble">높은음 (Treble)</option>
-                  <option value="bass">낮은음 (Bass)</option>
-                </select>
-              </div>
-              <div className="flex-1">
-                <label className="text-sm font-semibold text-slate-700 block mb-2">조표 (Key)</label>
-                <select
-                  value={keySignature}
-                  onChange={(e) => setKeySignature(e.target.value)}
-                  className="w-full border border-slate-300 rounded-md p-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                >
-                  <option value="C">C Major</option>
-                  <option value="G">G Major (1#)</option>
-                  <option value="D">D Major (2#)</option>
-                  <option value="A">A Major (3#)</option>
-                  <option value="E">E Major (4#)</option>
-                  <option value="B">B Major (5#)</option>
-                  <option value="F">F Major (1b)</option>
-                  <option value="Bb">Bb Major (2b)</option>
-                  <option value="Eb">Eb Major (3b)</option>
-                  <option value="Ab">Ab Major (4b)</option>
-                </select>
-              </div>
-            </div>
-
-            {/* 임시표 설정 */}
-            <div className="flex justify-between items-center bg-white p-3 rounded-lg border border-slate-200 shadow-sm">
-              <span className="text-sm font-semibold text-slate-700">임시표(#/b) 포함</span>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox" className="sr-only peer"
-                  checked={useAccidentals} onChange={(e) => setUseAccidentals(e.target.checked)}
-                />
-                <div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-indigo-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
-              </label>
-            </div>
-
-            {/* 박자 다양화 설정 */}
-            <div className="flex justify-between items-center bg-white p-3 rounded-lg border border-slate-200 shadow-sm">
-              <span className="text-sm font-semibold text-slate-700">다양한 박자 포함</span>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox" className="sr-only peer"
-                  checked={randomBeats} onChange={(e) => setRandomBeats(e.target.checked)}
-                />
-                <div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-indigo-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
-              </label>
-            </div>
-
-            {/* 표기 방식 설정 */}
-            <div className="flex justify-between items-center bg-white p-3 rounded-lg border border-slate-200 shadow-sm">
-              <span className="text-sm font-semibold text-slate-700">계이름(도레미) 표기</span>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox" className="sr-only peer"
-                  checked={displayMode === 'solfege'} onChange={(e) => setDisplayMode(e.target.checked ? 'solfege' : 'alphabet')}
-                />
-                <div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-indigo-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
-              </label>
-            </div>
-
-            {/* 이중 슬라이더 기반 음역대 설정 */}
-            <div className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm space-y-4">
-              <span className="text-sm font-semibold text-slate-700 block border-b pb-2 mb-2">음역대 지정 범위</span>
-
-              <div className="relative pt-4 pb-2">
-                <div className="relative w-full h-2 bg-slate-200 rounded-full flex items-center">
-                  <div
-                    className="absolute h-2 bg-indigo-500 rounded-full pointer-events-none"
-                    style={{ left: `${minPercent}%`, width: `${maxPercent - minPercent}%` }}
-                  />
-
-                  <input
-                    type="range" min={MIN} max={MAX} value={range[0]}
-                    onChange={(e) => {
-                      const val = Math.min(Number(e.target.value), range[1] - 1);
-                      setRange([val, range[1]]);
-                    }}
-                    className="absolute w-full appearance-none bg-transparent pointer-events-none z-20
-                      [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-indigo-600 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-grab"
-                  />
-
-                  <input
-                    type="range" min={MIN} max={MAX} value={range[1]}
-                    onChange={(e) => {
-                      const val = Math.max(Number(e.target.value), range[0] + 1);
-                      setRange([range[0], val]);
-                    }}
-                    className="absolute w-full appearance-none bg-transparent pointer-events-none z-30
-                      [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-indigo-600 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-grab"
-                  />
-                </div>
-
-                <div className="flex justify-between items-center mt-4 text-sm font-bold text-indigo-700">
-                  <span className="bg-indigo-50 px-2 py-1 rounded">{ALL_NOTES[range[0]].display}</span>
-                  <span className="text-slate-400 text-xs">to</span>
-                  <span className="bg-indigo-50 px-2 py-1 rounded">{ALL_NOTES[range[1]].display}</span>
-                </div>
-              </div>
-
-            </div>
+          <div className="flex items-center gap-4 text-sm font-semibold text-slate-600">
+            <div>점수: <span className="text-indigo-600 text-lg ml-0.5">{uiScore}</span></div>
+            <div>연속: <span className="text-orange-500 text-lg ml-0.5">{uiStreak}</span></div>
           </div>
         </div>
 
-        {/* 우측: 게임 화면 */}
-        <div className="flex-1 flex flex-col bg-white relative">
-
-          <div className="flex justify-between items-center p-4 border-b border-slate-100 bg-white">
+        {/* 오선지 캔버스 영역 */}
+        <div className="py-2 flex flex-col items-center justify-center relative flex-1 min-h-[260px] bg-white overflow-hidden">
+          
+          {/* 상단 기능 영역 */}
+          <div className="absolute top-2 left-0 right-0 px-4 flex justify-between items-center z-10">
             <div className="flex items-center gap-2">
-              <Music className="w-5 h-5 text-indigo-600" />
-              <h1 className="text-lg font-bold text-slate-800">테스트</h1>
-            </div>
-            <div className="flex items-center gap-6">
-              <div className="text-sm font-semibold text-slate-600">
-                점수: <span className="text-indigo-600 text-xl ml-1">{uiScore}</span>
-              </div>
-              <div className="text-sm font-semibold text-slate-600">
-                연속: <span className="text-orange-500 text-xl ml-1">{uiStreak}</span>
-              </div>
-              <button onClick={resetGame} className="p-2 bg-slate-100 hover:bg-slate-200 rounded-full transition-colors">
-                <RefreshCw className="w-4 h-4 text-slate-600" />
+              <button onClick={resetGame} className="p-1.5 text-slate-400 hover:text-slate-600 transition-colors">
+                <RefreshCw className="w-5 h-5" />
               </button>
-            </div>
-          </div>
-
-          <div className="py-4 flex flex-col items-center justify-center relative flex-1 min-h-[260px] bg-white overflow-hidden">
-            <canvas ref={canvasRef} className="block" width={CANVAS_WIDTH} height={CANVAS_HEIGHT} style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT }} />
-
-            {!isVexLoaded && (
-              <div className="absolute inset-0 flex items-center justify-center bg-white/90">
-                <span className="text-sm font-medium text-indigo-500 animate-pulse">악보 엔진 로딩 중...</span>
+              
+              <div className="flex items-center">
+                <button 
+                  onClick={handleSyncTap}
+                  className="flex items-center gap-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 px-2 py-1 rounded-full text-xs font-bold border border-indigo-200 transition-colors mr-2"
+                  title="박자에 맞춰 탭하여 싱크 조정"
+                >
+                  <MousePointerClick className="w-3.5 h-3.5" />
+                  TAP
+                </button>
+                {syncMessage && <span className="text-xs text-indigo-500 font-medium w-16 whitespace-nowrap">{syncMessage}</span>}
               </div>
-            )}
-
-            <div className="absolute bottom-4 h-6 flex items-center justify-center w-full pointer-events-none">
-              {feedback === 'correct' && <span className="text-green-500 text-base font-bold flex items-center gap-1"><CheckCircle2 className="w-5 h-5" /> 정답!</span>}
-              {feedback === 'incorrect' && <span className="text-red-500 text-base font-bold flex items-center gap-1"><XCircle className="w-5 h-5" /> 오답!</span>}
-              {feedback === 'missed' && <span className="text-orange-500 text-base font-bold flex items-center gap-1"><AlertCircle className="w-5 h-5" /> 놓침!</span>}
             </div>
+
+            <div className="flex items-center gap-3 bg-slate-100 px-3 py-1.5 rounded-full shadow-inner border border-slate-200">
+              <button 
+                onClick={() => setSoundEnabled(!soundEnabled)} 
+                className={`p-0.5 transition-colors ${soundEnabled ? 'text-indigo-600' : 'text-slate-400'}`}
+              >
+                {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+              </button>
+              <div className="flex gap-1.5">
+                {[0, 1, 2, 3].map((beat) => (
+                  <div 
+                    key={beat} 
+                    className={`w-2.5 h-2.5 rounded-full transition-colors duration-100 ${
+                      currentBeat === beat 
+                        ? (beat === 3 ? 'bg-indigo-600 shadow-[0_0_6px_rgba(79,70,229,0.6)]' : 'bg-indigo-400') 
+                        : 'bg-slate-300'
+                    }`} 
+                  />
+                ))}
+              </div>
+            </div>
+            
+            <button onClick={() => setShowSettings(true)} className="p-1.5 text-slate-400 hover:text-indigo-600 transition-colors ml-2">
+              <Settings2 className="w-6 h-6" />
+            </button>
           </div>
 
-          {/* 건반 UI */}
-          <div className="p-6 bg-slate-100 border-t border-slate-200 pb-8">
-            <div className="flex flex-col gap-2 max-w-[360px] mx-auto">
-              {/* 검은 건반 */}
-              <div className="flex justify-center gap-2">
-                {BLACK_KEYS.map((key, idx) => (
-                  key.spacer ? (
-                    <div key={`spacer-${idx}`} className="w-[46px]"></div>
-                  ) : (
-                    <button
-                      key={key.id}
-                      onClick={() => handleGuess(key.id)}
-                      disabled={!isVexLoaded || !useAccidentals}
-                      className={`
-                        w-[46px] h-12 rounded text-xs font-bold transition-all duration-75
-                        ${useAccidentals
-                          ? 'bg-slate-800 text-white hover:bg-slate-700 active:bg-slate-900 active:scale-95 shadow-md'
-                          : 'bg-slate-300 text-slate-400 cursor-not-allowed opacity-50'
-                        }
-                      `}
+          <canvas ref={canvasRef} className="block mt-4" width={CANVAS_WIDTH} height={CANVAS_HEIGHT} style={{ width: CANVAS_WIDTH, height: CANVAS_HEIGHT }} />
+          
+          {!isVexLoaded && (
+            <div className="absolute inset-0 flex items-center justify-center bg-white/90 z-0">
+              <span className="text-sm font-medium text-indigo-500 animate-pulse">악보 엔진 로딩 중...</span>
+            </div>
+          )}
+
+          {/* 피드백 메시지 */}
+          <div className="absolute bottom-2 h-6 flex items-center justify-center w-full pointer-events-none z-10">
+            {feedback.status === 'correct' && <span className="text-green-500 text-base font-bold flex items-center gap-1"><CheckCircle2 className="w-5 h-5" /> {feedback.message}</span>}
+            {feedback.status === 'incorrect' && <span className="text-red-500 text-base font-bold flex items-center gap-1"><XCircle className="w-5 h-5" /> {feedback.message}</span>}
+            {feedback.status === 'missed' && <span className="text-orange-500 text-base font-bold flex items-center gap-1"><AlertCircle className="w-5 h-5" /> {feedback.message}</span>}
+          </div>
+
+          {/* 설정 팝오버 */}
+          {showSettings && (
+            <div className="absolute inset-0 bg-white/95 backdrop-blur-sm z-20 p-5 overflow-y-auto border-t border-slate-200">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-lg font-bold text-indigo-700 flex items-center gap-2">
+                  <Settings2 className="w-5 h-5" /> 환경 설정
+                </h2>
+                <button onClick={() => setShowSettings(false)} className="p-1 text-slate-500 hover:text-slate-800 bg-slate-100 rounded-full">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+                  <label className="text-sm font-semibold text-slate-700 block mb-1">메트로놈 속도: {bpm} BPM</label>
+                  <input 
+                    type="range" min="30" max="240" step="5" 
+                    value={bpm} onChange={(e) => setBpm(Number(e.target.value))}
+                    className="w-full accent-indigo-500"
+                  />
+                  <div className="flex justify-between items-center mt-3">
+                    <span className="text-xs font-semibold text-slate-600">오디오 싱크 보정 (수동)</span>
+                    <div className="flex items-center gap-2">
+                      <input 
+                        type="number" value={syncOffset} onChange={(e) => setSyncOffset(Number(e.target.value))}
+                        className="w-16 border border-slate-300 rounded px-1.5 py-1 text-xs text-right"
+                      />
+                      <span className="text-xs text-slate-500">ms</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex gap-2">
+                  <div className="flex-1">
+                    <label className="text-xs font-semibold text-slate-600 block mb-1">음자리표</label>
+                    <select 
+                      value={clef} onChange={(e) => setClef(e.target.value as 'treble' | 'bass')}
+                      className="w-full border border-slate-300 rounded p-1.5 text-sm bg-white"
                     >
-                      {(displayMode === 'solfege' ? SOLFEGE_MAP[key.id] : key.id).split('/')[0]}<br/>
-                      <span className="text-[10px] font-normal">{(displayMode === 'solfege' ? SOLFEGE_MAP[key.id] : key.id).split('/')[1]}</span>
-                    </button>
-                  )
-                ))}
-              </div>
+                      <option value="treble">높은음 (Treble)</option>
+                      <option value="bass">낮은음 (Bass)</option>
+                    </select>
+                  </div>
+                  <div className="flex-1">
+                    <label className="text-xs font-semibold text-slate-600 block mb-1">조표 (Key)</label>
+                    <select 
+                      value={keySignature} onChange={(e) => setKeySignature(e.target.value)}
+                      className="w-full border border-slate-300 rounded p-1.5 text-sm bg-white"
+                    >
+                      <option value="C">C Major</option><option value="G">G Major (1#)</option>
+                      <option value="D">D Major (2#)</option><option value="A">A Major (3#)</option>
+                      <option value="E">E Major (4#)</option><option value="B">B Major (5#)</option>
+                      <option value="F">F Major (1b)</option><option value="Bb">Bb Major (2b)</option>
+                      <option value="Eb">Eb Major (3b)</option><option value="Ab">Ab Major (4b)</option>
+                    </select>
+                  </div>
+                </div>
 
-              {/* 흰 건반 */}
-              <div className="flex justify-center gap-2">
-                {WHITE_KEYS.map((key) => (
-                  <button
-                    key={key}
-                    onClick={() => handleGuess(key)}
-                    disabled={!isVexLoaded}
-                    className="w-[46px] h-14 bg-white border border-slate-300 rounded shadow-sm text-indigo-700 text-lg font-bold hover:bg-indigo-50 hover:border-indigo-400 active:bg-slate-100 active:scale-95 transition-all duration-75"
-                  >
-                    {displayMode === 'solfege' ? SOLFEGE_MAP[key] : key}
-                  </button>
-                ))}
+                <div className="space-y-2">
+                  <label className="flex justify-between items-center bg-white px-3 py-2 rounded border border-slate-200 cursor-pointer">
+                    <span className="text-sm font-medium text-slate-700">임시표(#/b) 포함</span>
+                    <input type="checkbox" checked={useAccidentals} onChange={(e) => setUseAccidentals(e.target.checked)} className="accent-indigo-600 w-4 h-4" />
+                  </label>
+                  <label className="flex justify-between items-center bg-white px-3 py-2 rounded border border-slate-200 cursor-pointer">
+                    <span className="text-sm font-medium text-slate-700">다양한 박자 포함</span>
+                    <input type="checkbox" checked={randomBeats} onChange={(e) => setRandomBeats(e.target.checked)} className="accent-indigo-600 w-4 h-4" />
+                  </label>
+                  <label className="flex justify-between items-center bg-white px-3 py-2 rounded border border-slate-200 cursor-pointer">
+                    <span className="text-sm font-medium text-slate-700">계이름(도레미) 표기</span>
+                    <input type="checkbox" checked={displayMode === 'solfege'} onChange={(e) => setDisplayMode(e.target.checked ? 'solfege' : 'alphabet')} className="accent-indigo-600 w-4 h-4" />
+                  </label>
+                </div>
+
+                <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+                  <span className="text-sm font-semibold text-slate-700 block mb-2">음역대 지정 범위</span>
+                  <div className="relative pt-2 pb-2">
+                    <div className="relative w-full h-2 bg-slate-200 rounded-full flex items-center">
+                      <div className="absolute h-2 bg-indigo-500 rounded-full pointer-events-none" style={{ left: `${minPercent}%`, width: `${maxPercent - minPercent}%` }} />
+                      <input 
+                        type="range" min={MIN} max={MAX} value={range[0]}
+                        onChange={(e) => setRange([Math.min(Number(e.target.value), range[1] - 1), range[1]])}
+                        className="absolute w-full appearance-none bg-transparent pointer-events-none z-20 [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-indigo-600 [&::-webkit-slider-thumb]:rounded-full"
+                      />
+                      <input 
+                        type="range" min={MIN} max={MAX} value={range[1]}
+                        onChange={(e) => setRange([range[0], Math.max(Number(e.target.value), range[0] + 1)])}
+                        className="absolute w-full appearance-none bg-transparent pointer-events-none z-30 [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-indigo-600 [&::-webkit-slider-thumb]:rounded-full"
+                      />
+                    </div>
+                    <div className="flex justify-between items-center mt-3 text-xs font-bold text-indigo-700">
+                      <span className="bg-white px-1.5 py-0.5 rounded border border-slate-200">{ALL_NOTES[range[0]].display}</span>
+                      <span className="bg-white px-1.5 py-0.5 rounded border border-slate-200">{ALL_NOTES[range[1]].display}</span>
+                    </div>
+                  </div>
+                </div>
+
               </div>
             </div>
-          </div>
-
+          )}
         </div>
+
+        {/* 건반 UI */}
+        <div className="p-5 bg-slate-100 border-t border-slate-200 pb-8 z-0">
+          <div className="flex flex-col gap-2 max-w-[360px] mx-auto">
+            <div className="flex justify-center gap-2">
+              {BLACK_KEYS.map((key, idx) => (
+                key.spacer ? (
+                  <div key={`spacer-${idx}`} className="w-[42px]"></div>
+                ) : (
+                  <button
+                    key={key.id}
+                    onClick={() => handleGuess(key.id)}
+                    disabled={!isVexLoaded || !useAccidentals}
+                    className={`
+                      w-[42px] h-12 rounded text-xs font-bold transition-all duration-75
+                      ${useAccidentals 
+                        ? 'bg-slate-800 text-white hover:bg-slate-700 active:bg-slate-900 active:scale-95 shadow-md' 
+                        : 'bg-slate-300 text-slate-400 cursor-not-allowed opacity-50'
+                      }
+                    `}
+                  >
+                    {(displayMode === 'solfege' ? SOLFEGE_MAP[key.id] : key.id).split('/')[0]}<br/>
+                    <span className="text-[9px] font-normal">{(displayMode === 'solfege' ? SOLFEGE_MAP[key.id] : key.id).split('/')[1]}</span>
+                  </button>
+                )
+              ))}
+            </div>
+            
+            <div className="flex justify-center gap-2">
+              {WHITE_KEYS.map((key) => (
+                <button
+                  key={key}
+                  onClick={() => handleGuess(key)}
+                  disabled={!isVexLoaded}
+                  className="w-[42px] h-14 bg-white border border-slate-300 rounded shadow-sm text-indigo-700 text-lg font-bold hover:bg-indigo-50 hover:border-indigo-400 active:bg-slate-100 active:scale-95 transition-all duration-75"
+                >
+                  {displayMode === 'solfege' ? SOLFEGE_MAP[key] : key}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
   );
